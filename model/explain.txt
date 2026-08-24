@@ -1,0 +1,45 @@
+admm_golden_float64.py
+	[Khởi tạo / Offline]:
+    		- Ma trận hệ số: A = Sigma + rho * I (đối xứng xác định dương)
+    		- Phân rã Cholesky: A = L * L^T (chỉ tính 1 lần ban đầu)
+	[Vòng lặp k = 0, 1, ..., max_iter]:
+	
+	
+	b1 : w-update (Giải hệ phương trình tuyến tính A*w = b)
+		'Cholesky-Banachiewicz A = L(L^T)
+		foward_solve Ly = b -> y
+		backward_solve (L^T)w = y -> w'
+		    
+		- Cập nhật vế phải: b = mu + rho * (z^k - u^k)
+    		- Forward solve (Thế xuôi):   L * y = b        -> tìm y
+    		- Backward solve (Thế ngược): L^T * w^(k+1) = y -> tìm w^(k+1)
+    		* HW: 1D Folded Systolic Array (DSP48E2 MAC Engines)
+		
+	b2 : z-update (a) - Soft-Thresholding (Toán tử co mềm phạt L1)
+		cộng với vector đối ngẫu v = (w^(k+1)) + u^k
+		soft_threshold v - last_w rồi so sánh từng phần tử z_i với ngưỡng -> z
+	
+
+		 - Tính vector dịch chuyển: v = w^(k+1) + u^k
+   		 - Tính độ lệch danh mục:   delta = v - w_prev
+    		 - Co mềm với ngưỡng tau = lambda / rho:
+        			z_tilde = w_prev + sign(delta) * max(|delta| - tau, 0)
+    		 * HW: SIMD Soft-Thresholding Core	
+
+	b3 : z-update (b) - Simplex Projection (Chiếu tập lồi có chặn)
+		exact_simplex_projection tổng các z_i có thể khác 1 -> đưa tổng các z_i về 1
+		
+		- Tìm mức nước nu* thỏa mãn: sum(clip(z_tilde - nu*, 0, w_max)) = 1
+		- Cập nhật z^(k+1) = clip(z_tilde - nu*, 0, w_max)
+		* Đảm bảo đồng thời: Tổng tỷ trọng = 1 và 0 <= z_i <= w_max (No short-selling)
+		* HW: Bitonic Sorting Network + Prefix Water-Filling
+
+
+  	Bước 4: u-update (Cập nhật biến đối ngẫu / Dual Accumulation)
+    		- u^(k+1) = u^k + (w^(k+1) - z^(k+1))
+    		* HW: Dual Accumulator (Q4.20 với Guard bits)
+  	Bước 5: Stopping Check (Kiểm tra điều kiện hội tụ KKT)
+    		- Primal residual: ||w^(k+1) - z^(k+1)||_inf <= eps_pri
+    		- Dual residual:   rho * ||z^(k+1) - z^k||_inf <= eps_dual
+    		* Nếu thỏa cả 2 -> Dừng vòng lặp, xuất w_opt = z^(k+1)
+    		* HW: Pipelined Tree Comparator (Norm-inf)
