@@ -134,6 +134,7 @@ $$\|w^{k+1} - z^{k+1}\|_\infty \le \epsilon_{\text{pri}} \quad \text{and} \quad 
 ```text
 ADMM_Dynamic_FixedPoint/
 ├── docs/                      # Architectural specs, math proofs, fixed-point error budget
+│   └── NOVELTIES_AND_COMPARISON.md # Scientific novelties & state-of-the-art paper comparison
 ├── rtl/                       # SystemVerilog RTL Source Files
 │   ├── admm_top.sv            # Top-level IP Core with AXI4-Stream
 │   ├── cholesky_solver.sv     # 1D Systolic Array for triangular solve
@@ -150,6 +151,8 @@ ADMM_Dynamic_FixedPoint/
 │   ├── admm_golden_float64.py # Exact floating-point solver (NumPy/CVXPY)
 │   ├── admm_fixedpoint.py     # Bit-true dynamic fixed-point model (FixedPoint library)
 │   └── quant_error_sweep.py   # SNR vs bit-width sweep & convergence proof
+├── tests/                     # Automated unit and regression test suite
+│   └── test_admm_models.py    # 7/7 automated pytest suite
 ├── syn/                       # Vivado TCL Scripts & Synthesis Constraints
 │   ├── build_ip.tcl           # Package RTL as Vivado IP
 │   ├── create_kv260_bd.tcl    # Block Design script for Zynq MPSoC

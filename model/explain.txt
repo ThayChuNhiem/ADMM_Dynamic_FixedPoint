@@ -6,9 +6,6 @@ admm_golden_float64.py
 	
 	
 	b1 : w-update (Giải hệ phương trình tuyến tính A*w = b)
-		'Cholesky-Banachiewicz A = L(L^T)
-		foward_solve Ly = b -> y
-		backward_solve (L^T)w = y -> w'
 		    
 		- Cập nhật vế phải: b = mu + rho * (z^k - u^k)
     		- Forward solve (Thế xuôi):   L * y = b        -> tìm y

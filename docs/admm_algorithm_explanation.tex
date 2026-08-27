@@ -1,0 +1,243 @@
+\documentclass[12pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[vietnamese]{babel}
+\usepackage[T5]{fontenc}
+\usepackage{amsmath,amssymb,amsfonts,bm}
+\usepackage{geometry}
+\geometry{a4paper, margin=2cm}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{tcolorbox}
+\usepackage{listings}
+\usepackage{enumitem}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!80!black,
+    citecolor=blue!80!black,
+    urlcolor=blue!80!black
+}
+
+\tcbset{
+    boxrule=0.8pt,
+    colback=gray!5!white,
+    colframe=gray!60!black,
+    arc=2mm,
+    left=3mm,
+    right=3mm,
+    top=2mm,
+    bottom=2mm
+}
+
+\title{\textbf{PH\^AN T\'ICH THU\ẬT TO\'AN ADMM V\`A \'ANH X\Ạ PHẦN CỨNG FPGA}\\[0.5em]
+\large Chi tiết triển khai Reference Model Float64 (\texttt{admm\_golden\_float64.py})\\cho bài toán Tối ưu hóa danh mục đầu tư thời gian thực}
+\author{\textbf{FPGA Hardware Acceleration Team}}
+\date{\today}
+
+\usepackage{fontspec}
+\usepackage[vietnamese]{babel}
+% Có thể chỉ định rõ font hệ thống hỗ trợ tiếng Việt tốt:
+\setmainfont{Times New Roman} % hoặc Arial, Calibri
+
+\begin{document}
+
+\maketitle
+
+\hrule
+\vspace{1em}
+
+\section{Tổng quan bài toán tối ưu hóa danh mục đầu tư}
+
+Bài toán tái cân bằng danh mục đầu tư theo thời gian thực có xét đến chi phí giao dịch $\ell_1$ và ràng buộc tỷ trọng (Box-Constrained Simplex) được mô hình hóa dưới dạng bài toán quy hoạch toàn phương lồi:
+\begin{equation}
+\min_{w \in \mathbb{R}^N} \frac{1}{2} w^T \Sigma w - \mu^T w + \lambda \|w - w_{\text{prev}}\|_1 + \mathbb{I}_{\mathcal{C}}(w)
+\end{equation}
+Trong đó:
+\begin{itemize}[leftmargin=1.5em]
+    \item $\Sigma \in \mathbb{S}_{++}^N$: Ma trận hiệp phương sai lợi suất tài sản (đối xứng xác định dương).
+    \item $\mu \in \mathbb{R}^N$: Vector kỳ vọng lợi suất của $N$ tài sản.
+    \item $w_{\text{prev}} \in \mathbb{R}^N$: Vector tỷ trọng danh mục hiện tại (tại thời điểm $t-1$).
+    \item $\lambda > 0$: Hệ số phạt chi phí giao dịch $\ell_1$.
+    \item $\mathcal{C} = \left\{ w \in \mathbb{R}^N \;\middle|\; \sum_{i=1}^N w_i = 1, \; 0 \le w_i \le w_{\max} \right\}$: Tập ràng buộc simplex có chặn (không bán khống và giới hạn trần tỷ trọng $w_{\max}$).
+    \item $\mathbb{I}_{\mathcal{C}}(w)$: Hàm chỉ thị ($\mathbb{I}_{\mathcal{C}}(w) = 0$ nếu $w \in \mathcal{C}$, và $+\infty$ nếu ngược lại).
+\end{itemize}
+
+\section{Chu trình tính toán ADMM (5 bước hoàn chỉnh)}
+
+Kỹ thuật tách biến (Variable Splitting) đưa biến phụ $z \in \mathbb{R}^N$ với ràng buộc $w - z = 0$. Hàm Lagrangian tăng cường dạng thu phóng (Scaled Augmented Lagrangian) với tham số $\rho > 0$ và biến đối ngẫu $u = \frac{1}{\rho} y$ có dạng:
+\begin{equation}
+\mathcal{L}_\rho(w, z, u) = \frac{1}{2} w^T \Sigma w - \mu^T w + \lambda \|z - w_{\text{prev}}\|_1 + \mathbb{I}_{\mathcal{C}}(z) + \frac{\rho}{2} \|w - z + u\|_2^2 - \frac{\rho}{2} \|u\|_2^2
+\end{equation}
+
+Mỗi vòng lặp $k$ của ADMM được chia thành các bước tính toán đóng (closed-form updates):
+
+\begin{tcolorbox}
+\textbf{1. Tiền xử lý (Khởi tạo / Offline):}
+\begin{itemize}[leftmargin=1.5em]
+    \item Thiết lập ma trận hệ số: $A = \Sigma + \rho I_N$ (đối xứng xác định dương).
+    \item Phân rã Cholesky-Banachiewicz: $A = L_A L_A^T$ (\textit{chỉ tính 1 lần duy nhất}).
+\end{itemize}
+
+\textbf{2. Vòng lặp ADMM (Mỗi iteration $k = 0, 1, \dots, \text{max\_iter}-1$):}
+\begin{enumerate}[leftmargin=1.5em]
+    \item \textbf{Bước 1 ($w$-update):} Giải hệ phương trình $A w = \mu + \rho(z^k - u^k)$ qua 2 lần thế:
+    \begin{align}
+        L_A y &= \mu + \rho (z^k - u^k) \quad \longrightarrow \quad \text{tìm } y \text{ (Thế xuôi - Forward Solve)} \\
+        L_A^T w^{k+1} &= y \quad \longrightarrow \quad \text{tìm } w^{k+1} \text{ (Thế ngược - Backward Solve)}
+    \end{align}
+    \item \textbf{Bước 2 ($z$-update (a) - Soft-Thresholding):} Tính toán co mềm theo chi phí $\ell_1$:
+    \begin{equation}
+        v = w^{k+1} + u^k, \qquad \Delta = v - w_{\text{prev}}
+    \end{equation}
+    \begin{equation}
+        \tilde{z}_i = w_{\text{prev}, i} + \text{sign}(\Delta_i) \cdot \max\left( |\Delta_i| - \frac{\lambda}{\rho}, \; 0 \right)
+    \end{equation}
+    \item \textbf{Bước 3 ($z$-update (b) - Simplex Projection $\Pi_{\mathcal{C}}$):} Chiếu vector $\tilde{z}$ lên tập $\mathcal{C}$:
+    \begin{equation}
+        z_i^{k+1} = \text{clip}(\tilde{z}_i - \nu^*, \; 0, \; w_{\max}) \quad \text{sao cho} \quad \sum_{i=1}^N \text{clip}(\tilde{z}_i - \nu^*, \; 0, \; w_{\max}) = 1
+    \end{equation}
+    \item \textbf{Bước 4 ($u$-update - Dual Accumulation):} Tích luỹ sai số đối ngẫu:
+    \begin{equation}
+        u^{k+1} = u^k + (w^{k+1} - z^{k+1})
+    \end{equation}
+    \item \textbf{Bước 5 (Stopping Check - Điều kiện dừng KKT):}
+    \begin{equation}
+        r_{\text{pri}} = \|w^{k+1} - z^{k+1}\|_\infty \le \epsilon_{\text{pri}} \quad \land \quad s_{\text{dual}} = \rho \|z^{k+1} - z^k\|_\infty \le \epsilon_{\text{dual}}
+    \end{equation}
+\end{enumerate}
+\end{tcolorbox}
+
+\section{Bảng đối chiếu bước tính \& Ánh xạ phần cứng FPGA}
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.3}
+\begin{tabularx}{\textwidth}{l p{5.2cm} X c}
+\toprule
+\textbf{Bước ADMM} & \textbf{Biểu thức Toán học} & \textbf{Khối Phần cứng (HW Block)} & \textbf{Độ phức tạp} \\
+\midrule
+$w$-update & Giải $(L_A L_A^T) w = \mu + \rho (z - u)$ & 1D Folded Systolic Array (Dual DSP MAC) & $\mathcal{O}(N^2 / P)$ \\
+$z$-update (a) & $\tilde{z} = \mathcal{S}_{\lambda/\rho}(w + u - w_{\text{prev}}) + w_{\text{prev}}$ & SIMD Soft-Thresholding Core & $\mathcal{O}(N / P)$ \\
+$z$-update (b) & $z = \Pi_{\mathcal{C}}(\tilde{z})$ & Bitonic Sorting + Prefix Water-Filling & $\mathcal{O}(\log_2^2 N)$ \\
+$u$-update & $u \leftarrow u + (w - z)$ & Dual Accumulator DSP48E2 & $\mathcal{O}(N / P)$ \\
+Stopping Check & $\|w - z\|_\infty \le \epsilon_{\text{pri}} \;\land\; \rho \|z - z_{\text{old}}\|_\infty \le \epsilon_{\text{dual}}$ & Pipelined Tree Comparator & $\mathcal{O}(\log_2 N)$ \\
+\bottomrule
+\end{tabularx}
+\caption{Đối chiếu giữa các bước thuật toán và kiến trúc phần cứng trên Xilinx KV260.}
+\end{table}
+
+\section{Chi tiết từng hàm trong \texttt{admm\_golden\_float64.py}}
+
+\subsection{\texttt{cholesky\_factorize(A: np.ndarray) -> np.ndarray}}
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Mục đích:} Phân rã ma trận đối xứng xác định dương $A = \Sigma + \rho I \in \mathbb{R}^{N \times N}$ thành ma trận tam giác dưới $L$ thỏa mãn $A = L L^T$ bằng thuật toán Cholesky-Banachiewicz.
+    \item \textbf{Công thức tính toán:}
+    \begin{align}
+        L_{i,i} &= \sqrt{A_{i,i} - \sum_{k=0}^{i-1} L_{i,k}^2}, \quad \forall i = 0, \dots, N-1 \\
+        L_{i,j} &= \frac{1}{L_{j,j}} \left( A_{i,j} - \sum_{k=0}^{j-1} L_{i,k} L_{j,k} \right), \quad \forall i > j
+    \end{align}
+    \item \textbf{Nguyên lý hoạt động:} Duyệt từng hàng $i$ và cột $j \le i$. Tích vô hướng $\sum L_{i,k} L_{j,k}$ được tính luỹ tiến từ các phần tử đã biết. Nếu trên đường chéo ($i=j$), kiểm tra điều kiện dương $A_{i,i} - \text{sum} > 0$ rồi khai căn. Nếu ngoài đường chéo ($i>j$), chia cho phần tử đường chéo $L_{j,j}$.
+    \item \textbf{Ý nghĩa hiệu năng:} Chỉ cần thực thi một lần duy nhất lúc khởi tạo hệ thống vì ma trận $A$ cố định qua các vòng lặp ADMM.
+\end{itemize}
+
+\subsection{\texttt{forward\_solve(L: np.ndarray, b: np.ndarray) -> np.ndarray}}
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Mục đích:} Giải hệ ma trận tam giác dưới $L y = b$ tìm vector trung gian $y \in \mathbb{R}^N$ bằng phép thế xuôi (Forward Substitution).
+    \item \textbf{Công thức tính toán:}
+    \begin{equation}
+        y_i = \frac{1}{L_{i,i}} \left( b_i - \sum_{j=0}^{i-1} L_{i,j} y_j \right), \quad i = 0, 1, \dots, N-1
+    \end{equation}
+    \item \textbf{Nguyên lý hoạt động:} Duyệt $i$ từ $0 \to N-1$. Tại mỗi bước, trừ đi tích luỹ các biến $y_j$ ($j < i$) đã biết từ trước, sau đó chia cho hệ số $L_{i,i}$.
+    \item \textbf{Ánh xạ phần cứng:} Mảng Systolic Array 1D với các phần tử xử lý song song (PE) sử dụng bộ nhân-cộng DSP48E2.
+\end{itemize}
+
+\subsection{\texttt{backward\_solve(L: np.ndarray, y: np.ndarray) -> np.ndarray}}
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Mục đích:} Giải hệ ma trận tam giác trên $L^T w = y$ tìm vector nghiệm $w \in \mathbb{R}^N$ bằng phép thế ngược (Backward Substitution).
+    \item \textbf{Công thức tính toán:}
+    \begin{equation}
+        w_i = \frac{1}{L_{i,i}} \left( y_i - \sum_{j=i+1}^{N-1} L_{j,i} w_j \right), \quad i = N-1, N-2, \dots, 0
+    \end{equation}
+    \item \textbf{Nguyên lý hoạt động:} Duyệt ngược $i$ từ $N-1 \to 0$. Trừ đi tích luỹ các biến $w_j$ ($j > i$) đã biết ở các hàng phía dưới, sau đó chia cho $L_{i,i}$.
+\end{itemize}
+
+\subsection{\texttt{linear\_system\_solve(L: np.ndarray, b: np.ndarray) -> np.ndarray}}
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Mục đích:} Thực hiện trọn gói giải hệ phương trình tuyến tính đối xứng xác định dương $A w = b$ qua 2 bước thế liên tiếp:
+    \begin{equation}
+        w = \texttt{backward\_solve}(L, \; \texttt{forward\_solve}(L, b))
+    \end{equation}
+\end{itemize}
+
+\subsection{\texttt{soft\_threshold(v: np.ndarray, w\_prev: np.ndarray, threshold: float) -> np.ndarray}}
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Mục đích:} Tính toán toán tử tiệm cận (Proximal Operator) giải quyết hàm phạt chi phí giao dịch phi trơn $\lambda \|z - w_{\text{prev}}\|_1$.
+    \item \textbf{Công thức tính toán:} Với $\tau = \frac{\lambda}{\rho}$ và $\Delta = v - w_{\text{prev}}$:
+    \begin{equation}
+        \tilde{z}_i = w_{\text{prev}, i} + \text{sign}(\Delta_i) \cdot \max(|\Delta_i| - \tau, \; 0)
+    \end{equation}
+    \item \textbf{Ý nghĩa kinh tế/tài chính:}
+    \begin{itemize}
+        \item Nếu tín hiệu giao dịch nhỏ ($|\Delta_i| \le \tau$): Chi phí giao dịch lớn hơn lợi ích dự kiến $\implies$ Giữ nguyên tỷ trọng $\tilde{z}_i = w_{\text{prev}, i}$.
+        \item Nếu tín hiệu giao dịch đủ lớn ($|\Delta_i| > \tau$): Có lợi nhuận ròng sau chi phí $\implies$ Điều chỉnh tỷ trọng theo hướng tín hiệu một lượng bằng $\tau$.
+    \end{itemize}
+    \item \textbf{Ánh xạ phần cứng:} Khối SIMD Soft-Thresholding Core tính toán đồng thời song song trên toàn bộ $N$ tài sản chỉ trong 1 chu kỳ clock.
+\end{itemize}
+
+\subsection{\texttt{exact\_simplex\_projection(z\_tilde, w\_max, total\_budget=1.0) -> Tuple[np.ndarray, float]}}
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Mục đích:} Thực hiện phép chiếu Euclid trực giao chính xác từ vector $\tilde{z}$ lên tập đa diện lồi ràng buộc simplex có chặn $\mathcal{C}$.
+    \item \textbf{Nguyên lý bài toán:} Tìm nhân tử Lagrange đối ngẫu $\nu^*$ thỏa mãn:
+    \begin{equation}
+        z_i = \text{clip}(\tilde{z}_i - \nu^*, \; 0, \; w_{\max}) = \max(0, \; \min(\tilde{z}_i - \nu^*, \; w_{\max}))
+    \end{equation}
+    sao cho hàm tổng ngân sách đơn điệu giảm theo $\nu$:
+    \begin{equation}
+        \Phi(\nu) = \sum_{i=1}^N \text{clip}(\tilde{z}_i - \nu, \; 0, \; w_{\max}) = 1.0
+    \end{equation}
+    \item \textbf{Thuật toán Breakpoint / Water-Filling:}
+    \begin{enumerate}
+        \item Xác định tập điểm gãy $\mathcal{B} = \{ \tilde{z}_i \} \cup \{ \tilde{z}_i - w_{\max} \}$.
+        \item Sắp xếp giảm dần tập $\mathcal{B}$ để chia trục số thực thành các khoảng tuyến tính.
+        \item Tìm đoạn $[\nu_{\text{low}}, \nu_{\text{high}}]$ chứa giá trị $\Phi(\nu) = 1.0$.
+        \item Tính nghiệm giải tích chính xác của $\nu^*$ trong đoạn tích cực (active set):
+        \begin{equation}
+            \nu^* = \frac{\sum_{i \in \text{active}} \tilde{z}_i + \sum_{i \in \text{upper}} w_{\max} - 1}{|\text{active}|}
+        \end{equation}
+        \item Nếu nằm ngoài miền, kích hoạt thuật toán chia đôi (Bisection) dự phòng để đảm bảo độ chính xác tuyệt đối.
+    \end{enumerate}
+    \item \textbf{Ánh xạ phần cứng:} Mạng trộn sắp xếp Bitonic Sorting Network $\mathcal{O}(\log_2^2 N)$ kết hợp khối cộng dồn tiền tố (Prefix Water-Filling) tạo pipeline hoàn toàn không có chu trình chờ (no stalling).
+\end{itemize}
+
+\subsection{\texttt{admm\_portfolio\_solve(...)}}
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Mục đích:} Hàm điều phối chính (Top-level Solver) kết nối toàn bộ chu trình tính toán:
+    \begin{enumerate}
+        \item Khởi tạo $w = w_{\text{prev}}$, $z = w_{\text{prev}}$, $u = \mathbf{0}$.
+        \item Tính phân rã Cholesky $L_A$ từ $A = \Sigma + \rho I$.
+        \item Lặp qua từng iteration $k$:
+        \begin{itemize}
+            \item $w \leftarrow \texttt{linear\_system\_solve}(L_A, \mu + \rho(z - u))$
+            \item $\tilde{z} \leftarrow \texttt{soft\_threshold}(w + u, w_{\text{prev}}, \lambda/\rho)$
+            \item $z \leftarrow \texttt{exact\_simplex\_projection}(\tilde{z}, w_{\max})$
+            \item $u \leftarrow u + (w - z)$
+            \item Đánh giá sai số hội tụ $r_{\text{pri}}$ và $s_{\text{dual}}$.
+        \end{itemize}
+        \item Trả về tỷ trọng tối ưu $w^* = z$ cùng lịch sử hội tụ.
+    \end{enumerate}
+\end{itemize}
+
+\section{Kết luận}
+
+Kiến trúc thuật toán ADMM trên mô hình chuẩn \texttt{admm\_golden\_float64.py} được thiết kế theo cấu trúc mô-đun hóa chặt chẽ, tối ưu hóa triệt để cho việc ánh xạ trực tiếp sang phần cứng SystemVerilog trên FPGA AMD Xilinx Kria KV260:
+\begin{itemize}[leftmargin=1.5em]
+    \item Tách biệt hoàn toàn pha tính toán nặng Cholesky ra ngoài vòng lặp.
+    \item Giảm độ phức tạp mỗi vòng lặp xuống mức tuyến tính và logarit nhờ mảng Systolic Array và mạng sắp xếp Bitonic.
+    \item Đảm bảo nghiệm tối ưu luôn khả thi nghiêm ngặt (Strictly Feasible) trên tập lồi Simplex $\mathcal{C}$.
+\end{itemize}
+
+\end{document}
